@@ -1,7 +1,7 @@
 #include <cmath>
 
-#include "../../../SpaceHub/src/spaceHub.hpp"
-#include "../../../SpaceHub/src/taskflow/taskflow.hpp"
+#include "SpaceHub/src/spaceHub.hpp"
+#include "SpaceHub/src/taskflow/taskflow.hpp"
 using namespace hub;
 using namespace orbit;
 using namespace callback;
@@ -25,17 +25,19 @@ void full(size_t i, size_t j, size_t tot_num) {
 
     double v_orb = sqrt(consts::G * (M1 + mj) / a2);
 
+    double T0 = 2 * consts::pi * sqrt(a2 * a2 * a2 / (consts::G * (M1 + mj)));
+
     double v_inf = v_orb * fv1;
 
     double a_impulse = consts::G * (M1 + M2) / (v_inf * v_inf);
 
     double rp_max = 3 * a2;
-    //double b_max = 3 * std::max(a_impulse, a2);
-    double b_max  = rp_max * sqrt(1 + 2*consts::G*M1/(rp_max*v_inf*v_inf));
+    // double b_max = 3 * std::max(a_impulse, a2);
+    double b_max = rp_max * sqrt(1 + 2 * consts::G * M1 / (rp_max * v_inf * v_inf));
 
     double r_start = 10 * a2;
 
-    std::ofstream file{"full-" + std::to_string(i) + "-" + std::to_string(j) + ".txt"};
+    std::ofstream file{"results/full-" + std::to_string(i) + "-" + std::to_string(j) + ".txt"};
     // file << std::scientific << std::setprecision(6);
 
     for (size_t k = 0; k < tot_num; ++k) {
@@ -61,10 +63,10 @@ void full(size_t i, size_t j, size_t tot_num) {
 
         move_to_COM_frame(star, j1, j2);
 
-        double b = sqrt(random::Uniform(unit::Rs*unit::Rs, b_max*b_max));
+        double b = sqrt(random::Uniform(unit::Rs * unit::Rs, b_max * b_max));
 
         double w = random::Uniform(0, 2 * consts::pi);
-        
+
         auto orb =
             orbit::Hyperbolic(M_tot(star, j1, j2), intruder.mass, v_inf, b, w, 0.0, 0.0, r_start, orbit::Hyper::in);
 
@@ -74,11 +76,32 @@ void full(size_t i, size_t j, size_t tot_num) {
 
         Solver sim{0, star, j1, j2, intruder};
 
-        double t_end = 4 * orbit::time_to_periapsis(group(star, j1, j2), intruder);
-
         Solver::RunArgs args;
 
-        args.add_stop_condition(t_end);
+        args.atol = 1e-9;
+        args.rtol = 1e-9;
+
+        int extended_time = 0;
+
+        double t_end = 4 * orbit::time_to_periapsis(group(star, j1, j2), intruder);
+
+        auto stop_when = [&](auto& ptc, auto h) -> bool {
+            if (extended_time != 0) {
+                auto m_tot = ptc.mass(1) + ptc.mass(2);
+                auto cmp = (ptc.mass(1) * ptc.pos(1) + ptc.mass(2) * ptc.pos(2)) / m_tot;
+                auto a_b = norm(ptc.pos(1) - ptc.pos(2));
+                auto r0b = norm(cmp - ptc.pos(0));
+                auto r3b = norm(cmp - ptc.pos(3));
+                auto R_hill0 = pow(m_tot / (3 * ptc.mass(0)), 1.0 / 3) * r0b;
+                auto R_hill3 = pow(m_tot / (3 * ptc.mass(3)), 1.0 / 3) * r3b;
+
+                return ((a_b < 0.5 * R_hill0) && (a_b < 0.5 * R_hill3)) || (ptc.time() > 500 * T0);
+            } else {
+                return ptc.time() > t_end;
+            }
+        };
+
+        args.add_stop_condition(stop_when);
 
         int status = 0;
 
@@ -94,13 +117,29 @@ void full(size_t i, size_t j, size_t tot_num) {
             }
             return false;
         };
-        args.atol = 1e-9;
-        args.rtol = 1e-9;
+
         args.add_stop_condition(collision);
+
+        auto if_extended = [&](auto& ptc, auto h) {
+            if (extended_time == 0) {
+                auto [a10, e10] = calc_a_e(ptc.mass(0) + ptc.mass(1), ptc.pos(1) - ptc.pos(0), ptc.vel(1) - ptc.vel(0));
+                auto [a20, e20] = calc_a_e(ptc.mass(0) + ptc.mass(2), ptc.pos(2) - ptc.pos(0), ptc.vel(2) - ptc.vel(0));
+                auto [a13, e13] = calc_a_e(ptc.mass(3) + ptc.mass(1), ptc.pos(1) - ptc.pos(3), ptc.vel(1) - ptc.vel(3));
+                auto [a23, e23] = calc_a_e(ptc.mass(3) + ptc.mass(2), ptc.pos(2) - ptc.pos(3), ptc.vel(2) - ptc.vel(3));
+                auto [a12, e12] = calc_a_e(ptc.mass(1) + ptc.mass(2), ptc.pos(2) - ptc.pos(1), ptc.vel(2) - ptc.vel(1));
+
+                if (a10 < 0 && a20 < 0 && a13 < 0 && a23 < 0 && a12 > 0) {
+                    extended_time = 1;
+                }
+            }
+        };
+
+        args.add_operation(if_extended);
 
         args.add_stop_point_operation([&](auto& ptc, auto h) {
             if (status == -1) {
-                file << status << ' ' << b_max << ' ' << b << ' ' << 0 << ' ' << 0 << ' ' << 0 << '\n';
+                file << status << ' ' << b_max << ' ' << b << ' ' << 0.0 << ' ' << 0.0 << ' ' << 0.0 << ' '
+                     << ptc.time() / T0 << ' ' << extended_time << ' ' << 0.0 << ' ' << 0.0 << '\n';
                 return;
             }
             auto [a10, e10] = calc_a_e(ptc.mass(0) + ptc.mass(1), ptc.pos(1) - ptc.pos(0), ptc.vel(1) - ptc.vel(0));
@@ -108,8 +147,12 @@ void full(size_t i, size_t j, size_t tot_num) {
             auto [a13, e13] = calc_a_e(ptc.mass(3) + ptc.mass(1), ptc.pos(1) - ptc.pos(3), ptc.vel(1) - ptc.vel(3));
             auto [a23, e23] = calc_a_e(ptc.mass(3) + ptc.mass(2), ptc.pos(2) - ptc.pos(3), ptc.vel(2) - ptc.vel(3));
             auto [a12, e12] = calc_a_e(ptc.mass(1) + ptc.mass(2), ptc.pos(2) - ptc.pos(1), ptc.vel(2) - ptc.vel(1));
-            auto vcm = norm((ptc.mass(1)*ptc.vel(1)+ptc.mass(2)*ptc.vel(2))/(ptc.mass(1)+ptc.mass(2))-ptc.vel(0));
+            auto vcm =
+                norm((ptc.mass(1) * ptc.vel(1) + ptc.mass(2) * ptc.vel(2)) / (ptc.mass(1) + ptc.mass(2)) - ptc.vel(0));
+            auto pcm = (ptc.mass(1) * ptc.pos(1) + ptc.mass(2) * ptc.pos(2)) / (ptc.mass(1) + ptc.mass(2));
 
+            auto rcm0 = norm(pcm - ptc.pos(0));
+            auto rcm3 = norm(pcm - ptc.pos(3));
             if (a10 > 0 && a20 > 0) {
                 status = 0;
             } else if (a10 < 0 && a20 > 0 && a13 < 0 && a23 < 0) {
@@ -132,10 +175,12 @@ void full(size_t i, size_t j, size_t tot_num) {
                 status = 9;  // eject both capture none, binary!
             }
 
-	    if(status != 9){
-		vcm = 0;
-	    }
-            file << status << ' ' << b_max << ' ' << b << ' ' << a12 << ' ' << e12 << ' ' << vcm/v_orb << '\n';
+            if (status != 9) {
+                vcm = 0;
+            }
+
+            file << status << ' ' << b_max << ' ' << b << ' ' << a12 << ' ' << e12 << ' ' << vcm / v_orb << ' '
+                 << ptc.time() / T0 << ' ' << extended_time << ' ' << rcm0 << ' ' << rcm3 << '\n';
         });
 
         sim.run(args);
@@ -148,7 +193,7 @@ int main() {
     double f1max = 1;
     double df1 = (f1max - f1min) / (N - 1);
     double f2min = 0.2;
-    double f2max = 0.8;//sqrt(1 - 2 * pow(2 * mj / 3 / M1, 1.0 / 3));
+    double f2max = 0.8;  // sqrt(1 - 2 * pow(2 * mj / 3 / M1, 1.0 / 3));
     double df2 = (f2max - f2min) / (N - 1);
 
     for (size_t i = 0; i < N; ++i) {
@@ -158,7 +203,7 @@ int main() {
 
     tf::Executor executor;  // create multi thread executor; thread number = cpu logical core number
 
-    size_t tot_run = 10000000;
+    size_t tot_run = 100000;
     for (int i = N - 1; i >= 0; i--) {
         for (int j = N - 1; j >= 0; j--) {
             executor.silent_async(full, i, j, tot_run);
